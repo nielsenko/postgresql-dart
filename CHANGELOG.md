@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.5.21
+
+- Avoid an extra round trip per statement inside a transaction: the statement's portal is closed in its own exchange. An extended-protocol statement that a transaction does not await now completes like a simple-protocol one, instead of failing after it ran.
+
 ## 3.5.20
 
 - Fix the package no longer compiling to JavaScript (a 3.5.18 regression).

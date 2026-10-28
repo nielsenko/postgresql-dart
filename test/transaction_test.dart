@@ -211,17 +211,13 @@ void main() {
       ]);
     });
 
-    test('A transaction has to await extended queries', () async {
+    test("A transaction doesn't have to await extended queries", () async {
       await conn.runTx((session) async {
         expect(
           session.execute('select 1;'),
-          throwsA(
-            isA<PgException>().having(
-              (e) => e.message,
-              'message',
-              contains('did you forget to await a statement?'),
-            ),
-          ),
+          completion([
+            [1],
+          ]),
         );
       });
     });
@@ -325,7 +321,8 @@ void main() {
         final total = await conn.execute('SELECT id FROM t');
         expect(total, []);
 
-        expect(errs.length, 2);
+        // The inserts ran before the ROLLBACK, which undid them.
+        expect(errs, isEmpty);
       },
     );
 
