@@ -92,11 +92,30 @@ void main() {
         await connection.execute(r'SELECT $1::int AS value', parameters: [1]);
 
         expect(
-          sent.whereType<CloseMessage>(),
+          sent.whereType<CloseMessage>().where((m) => !m.isForPortal),
           isEmpty,
           reason:
               'the next parse replaces the unnamed statement, so closing it is an exchange that changes nothing',
         );
+      },
+    );
+
+    test(
+      'a statement in a transaction closes its portal in the same exchange',
+      () async {
+        await connection.runTx((tx) async {
+          sent.clear();
+          await tx.execute(r'SELECT $1::int AS value', parameters: [1]);
+
+          expect(sent.map((message) => message.runtimeType).toList(), [
+            ParseMessage,
+            BindMessage,
+            DescribeMessage,
+            ExecuteMessage,
+            CloseMessage,
+            SyncMessage,
+          ]);
+        });
       },
     );
 

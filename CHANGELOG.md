@@ -3,6 +3,7 @@
 ## 3.5.21
 
 - Add `ConnectionSettings.tlsConnector` to open TLS connections in place of the SSLRequest and `SecureSocket` upgrade.
+- Avoid an extra round trip per statement inside a transaction: the statement's portal is closed in its own exchange. An extended-protocol statement that a transaction does not await now completes like a simple-protocol one, instead of failing after it ran.
 
 ## 3.5.20
 
