@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:async/async.dart' as async;
-import 'package:charcode/ascii.dart';
 import 'package:meta/meta.dart';
 import 'package:pool/pool.dart' as pool;
 import 'package:stack_trace/stack_trace.dart';
@@ -18,11 +17,13 @@ import '../protocol/messages/logical_replication_messages.dart';
 import '../protocol/protocol.dart';
 import '../query/query_description.dart';
 import '../types/type_registry.dart';
+import '../utils/timeout.dart';
 import 'channels.dart';
 import 'connection_info.dart';
 import 'database_info.dart';
 import 'keep_alive.dart';
 import 'resolved_settings.dart';
+import 'tls_connector.dart';
 
 final _runTxZoneKey = Object();
 
@@ -310,153 +311,20 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
     );
   }
 
+  /// The message channel to [endpoint], and whether TLS protects it.
   static Future<(StreamChannel<Message>, bool)> _connect(
     Endpoint endpoint,
     ResolvedConnectionSettings settings, {
     required CodecContext codecContext,
     StreamTransformer<Uint8List, Uint8List>? incomingBytesTransformer,
   }) async {
-    final host = endpoint.host;
-    final port = endpoint.port;
+    final socket = await _openSocket(endpoint, settings);
 
-    var socket = await Socket.connect(
-      endpoint.isUnixSocket
-          ? InternetAddress(host, type: InternetAddressType.unix)
-          : host,
-      port,
-      timeout: settings.connectTimeout,
-    );
-
-    if (!endpoint.isUnixSocket) {
-      try {
-        // Disable Nagle's algorithm before the first write, including the SSL
-        // request and TLS handshake. The VM reports a failure to set it by
-        // throwing, never by returning false.
-        socket.setOption(SocketOption.tcpNoDelay, true);
-      } on UnsupportedError {
-        // Some socket implementations do not support this option.
-      } catch (_) {
-        // No channel owns the socket yet if configuring it fails.
-        socket.destroy();
-        rethrow;
-      }
-    }
-
-    if (!endpoint.isUnixSocket) {
-      // Must happen before the TLS upgrade: SecureSocket has no setRawOption.
-      applyKeepAlive(socket, settings.keepAlive);
-    }
-
-    final sslCompleter = Completer<int>();
-    // ignore: cancel_subscriptions
-    final subscription = socket.listen(
-      (data) {
-        if (sslCompleter.isCompleted) {
-          return;
-        }
-        if (data.length != 1) {
-          sslCompleter.completeError(
-            PgException(
-              'Could not initialize SSL connection, received unknown byte stream.',
-            ),
-          );
-          return;
-        }
-
-        sslCompleter.complete(data.first);
-      },
-      onDone: () {
-        if (sslCompleter.isCompleted) {
-          return;
-        }
-        sslCompleter.completeError(
-          PgException(
-            'Could not initialize SSL connection, connection closed during handshake.',
-          ),
-        );
-      },
-      onError: (e) {
-        if (sslCompleter.isCompleted) {
-          return;
-        }
-        sslCompleter.completeError(e);
-      },
-    );
-
-    Stream<Uint8List> adaptedStream;
-    var secure = false;
-
-    if (settings.sslMode != SslMode.disable) {
-      try {
-        // Query if SSL is possible by sending a SSLRequest message
-        final byteBuffer = ByteData(8);
-        byteBuffer.setUint32(0, 8);
-        byteBuffer.setUint32(4, 80877103);
-        socket.add(byteBuffer.buffer.asUint8List());
-
-        final byte = await sslCompleter.future.timeout(settings.connectTimeout);
-
-        if (byte == $S) {
-          // SSL is supported, upgrade!
-          subscription.pause();
-
-          // `.timeout()` below doesn't cancel the handshake - if it later
-          // succeeds anyway (after we've given up on it), close the
-          // resulting secure socket instead of leaking it, since nothing
-          // else would ever reach it.
-          var gaveUpOnHandshake = false;
-          final secureFuture = SecureSocket.secure(
-            socket,
-            context: settings.securityContext,
-            onBadCertificate: settings.sslMode.ignoreCertificateIssues
-                ? (_) => true
-                : (c) => throw BadCertificateException(c),
-          );
-          unawaited(
-            secureFuture
-                .then((s) {
-                  if (gaveUpOnHandshake) {
-                    s.destroy();
-                  }
-                })
-                .catchError((_) {}),
-          );
-          socket = await secureFuture.timeout(
-            settings.connectTimeout,
-            onTimeout: () {
-              gaveUpOnHandshake = true;
-              throw TimeoutException('SSL handshake timed out');
-            },
-          );
-          secure = true;
-
-          // We can listen to the secured socket again, the existing subscription is
-          // ignored.
-          adaptedStream = socket;
-        } else {
-          // This server does not support SSL
-          throw PgException(
-            'Server does not support SSL, but it was required (default configuration). '
-            'To disable secure connections, use `ConnectionSettings(sslMode: SslMode.disable)`.',
-          );
-        }
-      } catch (_) {
-        // The SSL handshake failed (timeout, bad cert, or the server doesn't
-        // support SSL) - at this point `PgConnectionImplementation` hasn't
-        // been constructed yet, so `connect()`'s own cleanup can't reach
-        // this socket. Close it here instead of leaking it.
-        socket.destroy();
-        unawaited(subscription.cancel());
-        rethrow;
-      }
-    } else {
-      // We've listened to the stream already and sockets are single-subscription
-      // streams. Expose it as a new stream.
-      adaptedStream = async.SubscriptionStream(subscription);
-    }
-
+    // The view only calls `listen` on the socket. A socket from IOOverrides
+    // or a connector doesn't have to implement the rest of [Stream].
+    Stream<Uint8List> incoming = StreamView(socket);
     if (incomingBytesTransformer != null) {
-      adaptedStream = adaptedStream.transform(incomingBytesTransformer);
+      incoming = incoming.transform(incomingBytesTransformer);
     }
 
     final outgoingSocket = async.StreamSinkExtensions(socket).transform<Uint8List>(
@@ -472,11 +340,101 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
 
     return (
       StreamChannel<List<int>>(
-        adaptedStream,
+        incoming,
         outgoingSocket,
       ).transform(messageTransformer(codecContext)),
-      secure,
+      socket is SecureSocket,
     );
+  }
+
+  /// Opens the socket to [endpoint], with TLS unless [SslMode.disable].
+  static Future<Socket> _openSocket(
+    Endpoint endpoint,
+    ResolvedConnectionSettings settings,
+  ) async {
+    final tlsConnector = settings.tlsConnector;
+    if (tlsConnector != null &&
+        settings.sslMode != SslMode.disable &&
+        !endpoint.isUnixSocket) {
+      final abandoned = Completer<void>();
+      final socket = await timeoutReleasingLate(
+        tlsConnector(
+          TlsConnectorContext(
+            host: endpoint.host,
+            port: endpoint.port,
+            sslMode: settings.sslMode,
+            timeout: settings.connectTimeout,
+            abandoned: abandoned.future,
+          ),
+        ),
+        settings.connectTimeout,
+        release: (socket) => socket.destroy(),
+        message: 'TLS connection timed out',
+        onGiveUp: (_) => abandoned.complete(),
+      );
+      // A connector can reach the server through a Unix socket, which has no
+      // TCP options.
+      if (socket.address.type != InternetAddressType.unix) {
+        _configureTcp(socket, settings.keepAlive);
+      }
+      return socket;
+    }
+
+    final socket = await Socket.connect(
+      endpoint.isUnixSocket
+          ? InternetAddress(endpoint.host, type: InternetAddressType.unix)
+          : endpoint.host,
+      endpoint.port,
+      timeout: settings.connectTimeout,
+    );
+    if (!endpoint.isUnixSocket) {
+      // Before the first write, so that TCP_NODELAY covers the SSLRequest
+      // and the TLS handshake too.
+      _configureTcp(socket, settings.keepAlive);
+    }
+    if (settings.sslMode == SslMode.disable) {
+      return socket;
+    }
+
+    await negotiateSsl(socket, settings.connectTimeout);
+    try {
+      return await timeoutReleasingLate(
+        SecureSocket.secure(
+          socket,
+          context: settings.securityContext,
+          onBadCertificate: settings.sslMode.ignoreCertificateIssues
+              ? (_) => true
+              : (c) => throw BadCertificateException(c),
+        ),
+        settings.connectTimeout,
+        release: (socket) => socket.destroy(),
+        message: 'SSL handshake timed out',
+      );
+    } catch (_) {
+      // This only reaches a socket that the upgrade didn't take over yet.
+      // A failed handshake closes the socket itself. A stalled one can't be
+      // aborted through `dart:io`, so its socket stays open until the server
+      // gives up. Postgres does after authentication_timeout, 60 s by
+      // default, but a stalled proxy may never close it.
+      socket.destroy();
+      rethrow;
+    }
+  }
+
+  /// Disables Nagle's algorithm on [socket] and applies [keepAlive].
+  static void _configureTcp(Socket socket, KeepAliveSettings keepAlive) {
+    try {
+      // The VM reports a failure to set it by throwing, never by returning
+      // false.
+      socket.setOption(SocketOption.tcpNoDelay, true);
+    } on UnsupportedError {
+      // Some socket implementations do not support this option.
+    } catch (_) {
+      // No channel owns the socket yet if configuring it fails.
+      socket.destroy();
+      rethrow;
+    }
+    applyKeepAlive(socket, keepAlive);
   }
 
   final Endpoint _endpoint;
@@ -612,7 +570,7 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
   /// right after it was accepted, before we got a chance to write to it.
   ///
   /// Writing to a closed [StreamSink] throws an opaque `Bad state: StreamSink
-  /// is closed` error; this turns that into a [PgException] that clearly
+  /// is closed` error. This turns that into a [PgException] that clearly
   /// identifies the connection as the cause and that later callers can
   /// meaningfully catch.
   void _send(Message message) {
@@ -818,7 +776,8 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
           try {
             await transaction._sendAndMarkClosed('ROLLBACK;');
           } catch (rollbackEx) {
-            // ROLLBACK failed — PG connection state is undefined, close it.
+            // ROLLBACK failed, so the PG connection state is undefined. Close
+            // it.
             _connection._closeAfterError(
               rollbackEx is PgException ? rollbackEx : null,
             );
@@ -843,7 +802,8 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
           try {
             await transaction._sendAndMarkClosed('ROLLBACK;');
           } catch (rollbackEx) {
-            // ROLLBACK failed — PG connection state is undefined, close it.
+            // ROLLBACK failed, so the PG connection state is undefined. Close
+            // it.
             // The original exception `e` still takes precedence over the
             // rollback failure below, regardless of its type - rethrowing
             // `rollbackEx` here instead would silently replace (and hide) a
@@ -914,7 +874,7 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
   Future<void> cancelPendingStatement() async {
     // A CancelRequest cancels whatever the backend runs when it arrives, so
     // remember the operation we meant to cancel and re-check it below. Null
-    // means a statement is still scheduling; cancel whatever runs by then.
+    // means a statement is still scheduling, so cancel whatever runs by then.
     final owner = _pending;
     if (_backendKeyMessage == null) {
       throw PgException(
@@ -1071,8 +1031,8 @@ class _PgResultStreamSubscription
   final _queueTimeout = Completer<Never>();
   ResultSchema? _resultSchema;
 
-  /// A timeout's CancelRequest timer and the cancel it started; the operation
-  /// lock is held until the cancel drains (see [_drainCancellation]).
+  /// A timeout's CancelRequest timer and the cancel it started. The operation
+  /// lock stays held until the cancel drains (see [_drainCancellation]).
   Timer? _cancelTimer;
   Future<void>? _pendingCancellation;
 
@@ -1393,10 +1353,11 @@ class _PgResultStreamSubscription
               );
               return;
             }
-            // Best effort: the cancel may not reach the server or may fail; the
-            // hard timeout below still guarantees this call won't hang forever.
-            // Only cancel if we're still the pending statement; keep the future
-            // so the lock is held until it drains (see [_drainCancellation]).
+            // Best effort. The cancel may not reach the server or may fail, and
+            // the hard timeout below still guarantees this call won't hang
+            // forever. Only cancel if we're still the pending statement, and
+            // keep the future so the lock stays held until it drains (see
+            // [_drainCancellation]).
             if (!identical(connection._pending, this) || _done.isCompleted) {
               return;
             }

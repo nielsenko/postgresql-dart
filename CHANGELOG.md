@@ -13,6 +13,7 @@
 **Other changes:**
 
 - `Connection.transactionStatus` exposing the transaction state reported by the server.
+- Add `ConnectionSettings.tlsConnector` to open TLS connections in place of the SSLRequest and `SecureSocket` upgrade, for example to run TLS natively. `TlsConnectorContext.requestSsl` sends the SSLRequest for connectors that need it.
 
 ## 3.6.0
 

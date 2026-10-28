@@ -10,6 +10,7 @@ import 'package:stream_channel/stream_channel.dart';
 
 import 'src/connection/connection.dart';
 import 'src/connection/replication.dart';
+import 'src/connection/tls_connector.dart';
 import 'src/protocol/protocol.dart';
 import 'src/query/query_description.dart';
 import 'src/types/type_registry.dart';
@@ -18,6 +19,8 @@ import 'src/types/types.dart';
 export 'src/connection/connection_info.dart' show ConnectionInfo;
 export 'src/connection/database_info.dart' show DatabaseInfo;
 export 'src/connection/replication.dart';
+export 'src/connection/tls_connector.dart'
+    show TlsConnector, TlsConnectorContext;
 export 'src/exceptions.dart'
     show
         BadCertificateException,
@@ -325,7 +328,7 @@ abstract class Connection implements Session, SessionExecutor {
   ///
   /// The value only changes when a statement completes, so it can be out of
   /// date while one is still running. Seeing [TransactionStatus.idle] after a
-  /// `COMMIT` does not prove the commit happened; look at the status from
+  /// `COMMIT` does not prove the commit happened. Look at the status from
   /// before the `COMMIT` too.
   TransactionStatus get transactionStatus;
 }
@@ -556,6 +559,10 @@ class ConnectionSettings extends SessionSettings {
   /// [ConnectionSettings.sslMode] should be set to [SslMode.verifyFull], as
   /// this package will allow other certificates or insecure connections
   /// otherwise.
+  ///
+  /// It doesn't apply to connections that a [tlsConnector] opens, so settings
+  /// can't set both. Settings that set either one replace both of the
+  /// fallback settings, such as the [PoolSettings] of [Pool.withConnection].
   final SecurityContext? securityContext;
 
   /// An optional [StreamChannelTransformer] sitting behind the postgres client
@@ -598,6 +605,17 @@ class ConnectionSettings extends SessionSettings {
   /// It has no effect on Unix-domain socket connections.
   final KeepAliveSettings? keepAlive;
 
+  /// Opens TLS connections in place of this package's SSLRequest and
+  /// [SecureSocket] upgrade, for example to run TLS natively.
+  ///
+  /// It is used when [sslMode] is not [SslMode.disable] and the endpoint is
+  /// not a Unix socket. [TlsConnectorContext] describes what it gets and what
+  /// it has to do. Settings can't set both this and [securityContext].
+  ///
+  /// A pool reuses a connection only for the same connector, compared with
+  /// `==`. Pass the same function each time rather than a new closure.
+  final TlsConnector? tlsConnector;
+
   const ConnectionSettings({
     this.applicationName,
     this.timeZone,
@@ -609,6 +627,7 @@ class ConnectionSettings extends SessionSettings {
     this.securityContext,
     this.onOpen,
     this.keepAlive,
+    this.tlsConnector,
     super.connectTimeout,
     super.queryTimeout,
     super.queryMode,
@@ -744,12 +763,18 @@ enum AccessMode {
   /// Read/write is the default.
   readWrite._('READ WRITE'),
 
-  /// When a transaction is read-only, the following SQL commands are disallowed:
-  /// INSERT, UPDATE, DELETE, MERGE, and COPY FROM if the table they would write
-  /// to is not a temporary table; all CREATE, ALTER, and DROP commands; COMMENT,
-  /// GRANT, REVOKE, TRUNCATE; and EXPLAIN ANALYZE and EXECUTE if the command
-  /// they would execute is among those listed. This is a high-level notion of
-  /// read-only that does not prevent all writes to disk.
+  /// When a transaction is read-only, the following SQL commands are
+  /// disallowed:
+  ///
+  /// - INSERT, UPDATE, DELETE, MERGE, and COPY FROM if the table they would
+  ///   write to is not a temporary table
+  /// - all CREATE, ALTER, and DROP commands
+  /// - COMMENT, GRANT, REVOKE and TRUNCATE
+  /// - EXPLAIN ANALYZE and EXECUTE if the command they would execute is among
+  ///   those listed
+  ///
+  /// This is a high-level notion of read-only that does not prevent all writes
+  /// to disk.
   readOnly._('READ ONLY');
 
   /// The SQL identifier of the access mode including leading space.

@@ -107,6 +107,8 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
   final Future<void> Function(Connection connection)? onOpen;
   @override
   final KeepAliveSettings keepAlive;
+  @override
+  final TlsConnector? tlsConnector;
 
   ResolvedConnectionSettings(
     ConnectionSettings? super.settings,
@@ -115,7 +117,8 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
       timeZone = settings?.timeZone ?? fallback?.timeZone ?? 'UTC',
       encoding = settings?.encoding ?? fallback?.encoding ?? utf8,
       sslMode = settings?.sslMode ?? fallback?.sslMode ?? SslMode.require,
-      securityContext = settings?.securityContext ?? fallback?.securityContext,
+      securityContext = _tlsSource(settings, fallback)?.securityContext,
+      tlsConnector = _tlsSource(settings, fallback)?.tlsConnector,
       // TODO: consider merging the transformers
       transformer = settings?.transformer ?? fallback?.transformer,
       replicationMode =
@@ -126,20 +129,41 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
       typeRegistry =
           settings?.typeRegistry ?? fallback?.typeRegistry ?? TypeRegistry(),
       onOpen = settings?.onOpen ?? fallback?.onOpen,
-      keepAlive = _resolveKeepAlive(settings?.keepAlive, fallback?.keepAlive);
+      keepAlive = _resolveKeepAlive(settings?.keepAlive, fallback?.keepAlive) {
+    if (securityContext != null && tlsConnector != null) {
+      throw ArgumentError(
+        'securityContext does not apply to connections that tlsConnector '
+        'opens. Set only one of them.',
+      );
+    }
+  }
+
+  /// The settings that both [securityContext] and [tlsConnector] come from.
+  ///
+  /// They resolve as a pair because the connector replaces the TLS that the
+  /// context configures. Resolved one by one, a context from [settings] would
+  /// go unused under a connector from [fallback].
+  static ConnectionSettings? _tlsSource(
+    ConnectionSettings? settings,
+    ConnectionSettings? fallback,
+  ) => settings?.securityContext != null || settings?.tlsConnector != null
+      ? settings
+      : fallback;
 
   bool isMatchingConnection(ResolvedConnectionSettings other) {
-    // `onOpen` deliberately isn't compared: it only runs once, when a
-    // connection is first opened (see its doc comment), so it has no
-    // bearing on whether an already-open connection is safe to reuse - a
-    // fresh closure per call (a natural Dart pattern) would otherwise
-    // silently defeat pooling for otherwise-identical settings.
+    // `onOpen` isn't compared. It only runs when a connection is first
+    // opened (see its doc comment), so it doesn't affect whether an open
+    // connection is safe to reuse. Comparing it would let a fresh closure
+    // per call, a natural Dart pattern, silently defeat pooling.
+    // `tlsConnector` is compared, because it decides how a connection is
+    // secured and also opens the side connection that cancels a statement.
     return isMatchingSession(other) &&
         applicationName == other.applicationName &&
         timeZone == other.timeZone &&
         encoding == other.encoding &&
         sslMode == other.sslMode &&
         securityContext == other.securityContext &&
+        tlsConnector == other.tlsConnector &&
         transformer == other.transformer &&
         replicationMode == other.replicationMode &&
         typeRegistry == other.typeRegistry &&

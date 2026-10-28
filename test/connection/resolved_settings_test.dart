@@ -53,6 +53,82 @@ void main() {
 
       expect(a.isMatchingConnection(b), isTrue);
     });
+
+    test('connections with different tlsConnector do not match', () {
+      final typeRegistry = TypeRegistry();
+      ResolvedConnectionSettings resolve(TlsConnector connector) =>
+          ResolvedConnectionSettings(
+            ConnectionSettings(
+              tlsConnector: connector,
+              typeRegistry: typeRegistry,
+            ),
+            null,
+          );
+
+      expect(
+        resolve(
+          _unusedConnector,
+        ).isMatchingConnection(resolve(_otherUnusedConnector)),
+        isFalse,
+      );
+      expect(
+        resolve(
+          _unusedConnector,
+        ).isMatchingConnection(resolve(_unusedConnector)),
+        isTrue,
+      );
+    });
+  });
+
+  group('ResolvedConnectionSettings TLS', () {
+    test('securityContext replaces the tlsConnector of the fallback', () {
+      final context = SecurityContext();
+
+      final settings = ResolvedConnectionSettings(
+        ConnectionSettings(securityContext: context),
+        ConnectionSettings(tlsConnector: _unusedConnector),
+      );
+
+      expect(settings.securityContext, same(context));
+      expect(settings.tlsConnector, isNull);
+    });
+
+    test('tlsConnector replaces the securityContext of the fallback', () {
+      final settings = ResolvedConnectionSettings(
+        ConnectionSettings(tlsConnector: _unusedConnector),
+        ConnectionSettings(securityContext: SecurityContext()),
+      );
+
+      expect(settings.securityContext, isNull);
+      expect(settings.tlsConnector, _unusedConnector);
+    });
+
+    test('settings without either keep those of the fallback', () {
+      final settings = ResolvedConnectionSettings(
+        ConnectionSettings(applicationName: 'app'),
+        ConnectionSettings(tlsConnector: _unusedConnector),
+      );
+
+      expect(settings.tlsConnector, _unusedConnector);
+    });
+
+    test('settings that set both throw', () {
+      final both = ConnectionSettings(
+        securityContext: SecurityContext(),
+        tlsConnector: _unusedConnector,
+      );
+
+      expect(() => ResolvedConnectionSettings(both, null), throwsArgumentError);
+      expect(
+        () => ResolvedPoolSettings(
+          PoolSettings(
+            securityContext: SecurityContext(),
+            tlsConnector: _unusedConnector,
+          ),
+        ),
+        throwsArgumentError,
+      );
+    });
   });
 
   group('ResolvedSessionSettings rejects non-positive timeouts', () {
@@ -89,3 +165,9 @@ void main() {
     });
   });
 }
+
+Future<Socket> _unusedConnector(TlsConnectorContext context) =>
+    throw UnimplementedError();
+
+Future<Socket> _otherUnusedConnector(TlsConnectorContext context) =>
+    throw UnimplementedError();

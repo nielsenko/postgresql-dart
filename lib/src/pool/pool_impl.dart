@@ -7,6 +7,7 @@ import 'package:postgres/src/utils/package_pool_ext.dart';
 import '../../postgres.dart';
 import '../connection/connection.dart';
 import '../connection/resolved_settings.dart';
+import '../utils/timeout.dart';
 
 EndpointSelector roundRobinSelector(List<Endpoint> endpoints) {
   int nextIndex = 0;
@@ -207,7 +208,7 @@ class PoolImplementation<L> implements Pool<L> {
         return await fn(connection);
       } catch (e) {
         // A non-fatal server error (e.g. a constraint violation) leaves the
-        // connection usable; only drop it when the error compromised it.
+        // connection usable. Only drop it when the error compromised it.
         reuse = e is PgException && !e.willAbortConnection;
         rethrow;
       }
@@ -281,28 +282,25 @@ class PoolImplementation<L> implements Pool<L> {
         await selected._dispose();
       }
 
-      final connectFuture = PgConnectionImplementation.connect(
-        endpoint,
-        connectionSettings: settings,
+      final connection = await timeoutReleasingLate(
+        PgConnectionImplementation.connect(
+          endpoint,
+          connectionSettings: settings,
+        ),
+        remainingTimeout,
+        // It was never added to `_connections`, so nothing else would close
+        // it.
+        release: (c) => c.close(force: true),
+        // Tracked so that `close()` waits for this cleanup too, instead of
+        // potentially returning before it's done.
+        onGiveUp: (released) {
+          late final Future<void> cleanup;
+          cleanup = released.whenComplete(
+            () => _pendingLateConnects.remove(cleanup),
+          );
+          _pendingLateConnects.add(cleanup);
+        },
       );
-      final PgConnectionImplementation connection;
-      try {
-        connection = await connectFuture.timeout(remainingTimeout);
-      } on TimeoutException {
-        // `.timeout()` doesn't cancel `connectFuture` - if it later
-        // succeeds anyway, close the resulting connection instead of
-        // leaking its socket (it was never added to `_connections`, so
-        // nothing else would ever close it). Track it in
-        // `_pendingLateConnects` so `close()` can wait for this cleanup
-        // too, instead of potentially returning before it's done.
-        late final Future<void> cleanup;
-        cleanup = connectFuture
-            .then((c) => c.close(force: true))
-            .catchError((_) {})
-            .whenComplete(() => _pendingLateConnects.remove(cleanup));
-        _pendingLateConnects.add(cleanup);
-        rethrow;
-      }
 
       final newc = _PoolConnection(this, endpoint, settings, connection);
       newc._isInUse = true;
