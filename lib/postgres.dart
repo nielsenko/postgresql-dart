@@ -463,6 +463,19 @@ final class Endpoint {
   }
 }
 
+/// Connects to the Postgres server at [host] and [port], asks it for SSL and
+/// completes the TLS handshake, honoring [sslMode].
+///
+/// The returned socket carries the plain protocol. [sslMode] is never
+/// [SslMode.disable]. The connection attempt is abandoned after [timeout].
+typedef TlsConnector =
+    Future<Socket> Function(
+      String host,
+      int port, {
+      required SslMode sslMode,
+      required Duration timeout,
+    });
+
 enum SslMode {
   /// No SSL is used, implies that password may be sent as plaintext.
   disable,
@@ -532,6 +545,13 @@ class ConnectionSettings extends SessionSettings {
   /// This callback function will be called after opening the connection.
   final Future<void> Function(Connection connection)? onOpen;
 
+  /// Opens TLS connections in place of this package's SSLRequest and
+  /// [SecureSocket] upgrade, for example to run TLS natively.
+  ///
+  /// It is used when [sslMode] is not [SslMode.disable] and the endpoint is
+  /// not a Unix socket. [securityContext] does not apply to it.
+  final TlsConnector? tlsConnector;
+
   const ConnectionSettings({
     this.applicationName,
     this.timeZone,
@@ -542,6 +562,7 @@ class ConnectionSettings extends SessionSettings {
     this.typeRegistry,
     this.securityContext,
     this.onOpen,
+    this.tlsConnector,
     super.connectTimeout,
     super.queryTimeout,
     super.queryMode,

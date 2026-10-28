@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.5.21
+
+- Add `ConnectionSettings.tlsConnector` to open TLS connections in place of the SSLRequest and `SecureSocket` upgrade.
+
 ## 3.5.20
 
 - Fix the package no longer compiling to JavaScript (a 3.5.18 regression).

@@ -85,6 +85,8 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
   final TypeRegistry typeRegistry;
   @override
   final Future<void> Function(Connection connection)? onOpen;
+  @override
+  final TlsConnector? tlsConnector;
 
   ResolvedConnectionSettings(
     ConnectionSettings? super.settings,
@@ -103,14 +105,15 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
       // TODO: consider merging the type registries
       typeRegistry =
           settings?.typeRegistry ?? fallback?.typeRegistry ?? TypeRegistry(),
-      onOpen = settings?.onOpen ?? fallback?.onOpen;
+      onOpen = settings?.onOpen ?? fallback?.onOpen,
+      tlsConnector = settings?.tlsConnector ?? fallback?.tlsConnector;
 
   bool isMatchingConnection(ResolvedConnectionSettings other) {
-    // `onOpen` deliberately isn't compared: it only runs once, when a
-    // connection is first opened (see its doc comment), so it has no
-    // bearing on whether an already-open connection is safe to reuse - a
-    // fresh closure per call (a natural Dart pattern) would otherwise
-    // silently defeat pooling for otherwise-identical settings.
+    // `onOpen` and `tlsConnector` deliberately aren't compared: they only
+    // run when a connection is first opened (see their doc comments), so
+    // they have no bearing on whether an already-open connection is safe to
+    // reuse - a fresh closure per call (a natural Dart pattern) would
+    // otherwise silently defeat pooling for otherwise-identical settings.
     return isMatchingSession(other) &&
         applicationName == other.applicationName &&
         timeZone == other.timeZone &&

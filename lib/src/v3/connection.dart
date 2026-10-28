@@ -315,6 +315,26 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
     final host = endpoint.host;
     final port = endpoint.port;
 
+    final tlsConnector = settings.tlsConnector;
+    if (tlsConnector != null &&
+        settings.sslMode != SslMode.disable &&
+        !endpoint.isUnixSocket) {
+      final socket = await _destroyIfLate(
+        tlsConnector(
+          host,
+          port,
+          sslMode: settings.sslMode,
+          timeout: settings.connectTimeout,
+        ),
+        settings.connectTimeout,
+        'TLS connection timed out',
+      );
+      return (
+        _channelOver(socket, socket, codecContext, incomingBytesTransformer),
+        true,
+      );
+    }
+
     var socket = await Socket.connect(
       endpoint.isUnixSocket
           ? InternetAddress(host, type: InternetAddressType.unix)
@@ -376,33 +396,16 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
           // SSL is supported, upgrade!
           subscription.pause();
 
-          // `.timeout()` below doesn't cancel the handshake - if it later
-          // succeeds anyway (after we've given up on it), close the
-          // resulting secure socket instead of leaking it, since nothing
-          // else would ever reach it.
-          var gaveUpOnHandshake = false;
-          final secureFuture = SecureSocket.secure(
-            socket,
-            context: settings.securityContext,
-            onBadCertificate: settings.sslMode.ignoreCertificateIssues
-                ? (_) => true
-                : (c) => throw BadCertificateException(c),
-          );
-          unawaited(
-            secureFuture
-                .then((s) {
-                  if (gaveUpOnHandshake) {
-                    s.destroy();
-                  }
-                })
-                .catchError((_) {}),
-          );
-          socket = await secureFuture.timeout(
+          socket = await _destroyIfLate(
+            SecureSocket.secure(
+              socket,
+              context: settings.securityContext,
+              onBadCertificate: settings.sslMode.ignoreCertificateIssues
+                  ? (_) => true
+                  : (c) => throw BadCertificateException(c),
+            ),
             settings.connectTimeout,
-            onTimeout: () {
-              gaveUpOnHandshake = true;
-              throw TimeoutException('SSL handshake timed out');
-            },
+            'SSL handshake timed out',
           );
           secure = true;
 
@@ -431,8 +434,56 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
       adaptedStream = async.SubscriptionStream(subscription);
     }
 
+    return (
+      _channelOver(
+        socket,
+        adaptedStream,
+        codecContext,
+        incomingBytesTransformer,
+      ),
+      secure,
+    );
+  }
+
+  /// Waits up to [timeout] for [connecting], then throws a
+  /// [TimeoutException] with [message].
+  ///
+  /// `.timeout()` doesn't cancel [connecting]. A socket it delivers after we
+  /// gave up is destroyed instead of leaked, since nothing else would ever
+  /// reach it.
+  static Future<Socket> _destroyIfLate(
+    Future<Socket> connecting,
+    Duration timeout,
+    String message,
+  ) {
+    var gaveUp = false;
+    unawaited(
+      connecting
+          .then((s) {
+            if (gaveUp) {
+              s.destroy();
+            }
+          })
+          .catchError((_) {}),
+    );
+    return connecting.timeout(
+      timeout,
+      onTimeout: () {
+        gaveUp = true;
+        throw TimeoutException(message);
+      },
+    );
+  }
+
+  /// The message channel over [socket], reading from [incoming].
+  static StreamChannel<Message> _channelOver(
+    Socket socket,
+    Stream<Uint8List> incoming,
+    CodecContext codecContext,
+    StreamTransformer<Uint8List, Uint8List>? incomingBytesTransformer,
+  ) {
     if (incomingBytesTransformer != null) {
-      adaptedStream = adaptedStream.transform(incomingBytesTransformer);
+      incoming = incoming.transform(incomingBytesTransformer);
     }
 
     final outgoingSocket = async.StreamSinkExtensions(socket).transform<Uint8List>(
@@ -446,13 +497,10 @@ class PgConnectionImplementation extends _PgSessionBase implements Connection {
       ),
     );
 
-    return (
-      StreamChannel<List<int>>(
-        adaptedStream,
-        outgoingSocket,
-      ).transform(messageTransformer(codecContext)),
-      secure,
-    );
+    return StreamChannel<List<int>>(
+      incoming,
+      outgoingSocket,
+    ).transform(messageTransformer(codecContext));
   }
 
   final Endpoint _endpoint;
