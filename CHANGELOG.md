@@ -4,6 +4,7 @@
 
 - Add `ConnectionSettings.tlsConnector` to open TLS connections in place of the SSLRequest and `SecureSocket` upgrade.
 - Avoid an extra round trip per statement inside a transaction: the statement's portal is closed in its own exchange. An extended-protocol statement that a transaction does not await now completes like a simple-protocol one, instead of failing after it ran.
+- Add `ConnectionSettings.pipelineDepth`. Above 1, statements started without awaiting the previous one, for example through `Future.wait`, are sent before the first is answered, saving a round trip each.
 
 ## 3.5.20
 
