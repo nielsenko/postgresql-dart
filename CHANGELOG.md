@@ -28,6 +28,7 @@
 - Add `PoolSettings.idleCheckAfter`: pool connections idle for at least this long are checked with a `SELECT 1` before reuse, and replaced if dead. Disabled by default.
 - Fix comments joining adjacent tokens (`SELECT a/*c*/FROM t` was sent as `SELECT aFROM t`) and handle nested block comments.
 - Enable TCP_NODELAY on TCP connections before PostgreSQL startup and TLS negotiation when supported.
+- Add `ConnectionSettings.pipelineDepth`. Above 1, statements started without awaiting the previous one, for example through `Future.wait`, are sent before the first is answered, saving a round trip each.
 
 ## 3.5.20
 

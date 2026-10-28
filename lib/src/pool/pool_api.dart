@@ -64,6 +64,7 @@ class PoolSettings extends ConnectionSettings {
     super.onOpen,
     super.typeRegistry,
     super.keepAlive,
+    super.pipelineDepth,
   });
 }
 

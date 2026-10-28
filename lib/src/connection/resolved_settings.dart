@@ -107,6 +107,8 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
   final Future<void> Function(Connection connection)? onOpen;
   @override
   final KeepAliveSettings keepAlive;
+  @override
+  final int pipelineDepth;
 
   ResolvedConnectionSettings(
     ConnectionSettings? super.settings,
@@ -126,7 +128,25 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
       typeRegistry =
           settings?.typeRegistry ?? fallback?.typeRegistry ?? TypeRegistry(),
       onOpen = settings?.onOpen ?? fallback?.onOpen,
-      keepAlive = _resolveKeepAlive(settings?.keepAlive, fallback?.keepAlive);
+      keepAlive = _resolveKeepAlive(settings?.keepAlive, fallback?.keepAlive),
+      pipelineDepth = _resolvePipelineDepth(settings, fallback);
+
+  static int _resolvePipelineDepth(
+    ConnectionSettings? settings,
+    ConnectionSettings? fallback,
+  ) {
+    final replicationMode =
+        settings?.replicationMode ??
+        fallback?.replicationMode ??
+        ReplicationMode.none;
+    // Replication streams after its start message, which nothing may follow.
+    if (replicationMode != ReplicationMode.none) return 1;
+    final depth = settings?.pipelineDepth ?? fallback?.pipelineDepth ?? 1;
+    if (depth < 1) {
+      throw ArgumentError.value(depth, 'pipelineDepth', 'must be at least 1');
+    }
+    return depth;
+  }
 
   bool isMatchingConnection(ResolvedConnectionSettings other) {
     // `onOpen` deliberately isn't compared: it only runs once, when a
@@ -140,6 +160,7 @@ class ResolvedConnectionSettings extends ResolvedSessionSettings
         encoding == other.encoding &&
         sslMode == other.sslMode &&
         securityContext == other.securityContext &&
+        pipelineDepth == other.pipelineDepth &&
         transformer == other.transformer &&
         replicationMode == other.replicationMode &&
         typeRegistry == other.typeRegistry &&
