@@ -41,6 +41,7 @@ class PoolSettings extends ConnectionSettings {
     super.ignoreStackTraces,
     super.onOpen,
     super.typeRegistry,
+    super.pipelineDepth,
   });
 }
 

@@ -532,6 +532,17 @@ class ConnectionSettings extends SessionSettings {
   /// This callback function will be called after opening the connection.
   final Future<void> Function(Connection connection)? onOpen;
 
+  /// How many statements the connection sends before the earliest of them
+  /// has been answered. The default, 1, waits for each answer before sending
+  /// the next statement.
+  ///
+  /// Above 1, statements started without awaiting the previous one, for
+  /// example through `Future.wait`, go out at once and are answered in order,
+  /// which saves a round trip each. Every statement still ends with its own
+  /// Sync, so outside a transaction a failing one does not affect the others.
+  /// A replication connection always uses 1.
+  final int? pipelineDepth;
+
   const ConnectionSettings({
     this.applicationName,
     this.timeZone,
@@ -542,6 +553,7 @@ class ConnectionSettings extends SessionSettings {
     this.typeRegistry,
     this.securityContext,
     this.onOpen,
+    this.pipelineDepth,
     super.connectTimeout,
     super.queryTimeout,
     super.queryMode,
